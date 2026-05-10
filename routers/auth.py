@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
-from app.database import get_connection
-from app.models.schemas import UserRegister, UserLogin
+from database import get_connection
+from models.schemas import UserRegister, UserLogin
 from passlib.context import CryptContext
 
 router = APIRouter()

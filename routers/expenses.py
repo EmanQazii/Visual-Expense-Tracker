@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
-from app.database import get_connection
-from app.models.schemas import ManualEntryInput
+from database import get_connection
+from models.schemas import ManualEntryInput
 
 router = APIRouter()
 
