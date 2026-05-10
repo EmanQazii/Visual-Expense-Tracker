@@ -10,13 +10,66 @@ router = APIRouter()
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+
+def validate_items(items, ocr_total):
+    """Flag suspicious prices before saving"""
+    validated = []
+    for item in items:
+        price = item["price"]
+        warning = None
+
+        # Single item costs more than entire receipt
+        if ocr_total and price > ocr_total:
+            warning = f"Price Rs{price} exceeds receipt total, may be OCR error"
+
+        # Suspiciously large price
+        if price > 10000:
+            warning = (warning or "") + " Price unusually high, please verify"
+
+        if warning:
+            item["price_warning"] = warning.strip()
+
+        validated.append(item)
+    return validated
+
+
+def resolve_total(calculated, ocr_total):
+    """
+    Decide which total to use and what warning to show.
+    Returns (total, total_warning)
+    """
+    if not ocr_total or ocr_total <= 0:
+        return calculated, None
+
+    difference = abs(ocr_total - calculated)
+    threshold_10pct = ocr_total * 0.10
+
+    if difference <= threshold_10pct:
+        # Close enough — trust calculated (item sum is more reliable)
+        return calculated, None
+
+    elif difference <= 500:
+        # Noticeable gap — likely a missing item or service charge
+        return ocr_total, (
+            f"Some items may be missing or a service charge was not extracted. "
+            f"Extracted items sum to Rs{calculated} but receipt shows Rs{ocr_total}. "
+            f"Please review before confirming."
+        )
+
+    else:
+        # Large gap — something seriously wrong with OCR
+        return ocr_total, (
+            f"Large discrepancy detected (Rs{calculated} extracted vs Rs{ocr_total} on receipt). "
+            f"Please verify all items manually."
+        )
+
+
 @router.post("/scan-receipt/{user_id}")
 async def scan_receipt(
     user_id: int,
     expense_type: str = Form(default="grocery"),
     file: UploadFile = File(...)
 ):
-    # Save uploaded file temporarily
     file_path = f"{UPLOAD_DIR}/{file.filename}"
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -36,37 +89,26 @@ async def scan_receipt(
 
         if not parsed["items"]:
             raise HTTPException(
-        status_code=400,
-        detail=f"No items found. Raw text: {raw_text[:500]}"
-        )
-        # Save to database with transaction
+                status_code=400,
+                detail=f"No items found. Raw text: {raw_text[:500]}"
+            )
+
+        ocr_total = parsed["total"]
+
+        # Validate individual item prices
+        items = validate_items(parsed["items"], ocr_total)
+
+        # Calculate sum of extracted items
+        calculated_total = round(sum(i["price"] for i in items), 2)
+
+        # Resolve which total to use
+        total, total_warning = resolve_total(calculated_total, ocr_total)
+
+        # Save to database
         conn = get_connection()
         cur = conn.cursor()
 
         try:
-            # Calculate total from items (more reliable than OCR read)
-            calculated_total = round(sum(
-                i["price"] for i in parsed["items"]
-            ), 2)
-
-            # Compare with OCR-read total if available
-            ocr_total = parsed["total"]
-            total_warning = None
-
-            if ocr_total and ocr_total > 0:
-                difference = abs(calculated_total - ocr_total)
-                # If difference is more than 5% flag a warning
-                if difference > (calculated_total * 0.05):
-                    total_warning = (
-                        f"OCR read total Rs{ocr_total} but "
-                        f"calculated total from items is Rs{calculated_total}. "
-                        f"Please verify."
-                    )
-                total = calculated_total
-            else:
-                total = calculated_total
-
-            # Insert entry
             cur.execute("""
                 INSERT INTO expense_entries
                     (user_id, source_name, total_amount,
@@ -83,8 +125,7 @@ async def scan_receipt(
 
             entry_id = cur.fetchone()[0]
 
-            # Insert items
-            for item in parsed["items"]:
+            for item in items:
                 cur.execute("""
                     INSERT INTO expense_items
                         (entry_id, item_name, price, quantity)
@@ -102,9 +143,10 @@ async def scan_receipt(
                 "message": "Receipt scanned successfully",
                 "entry_id": entry_id,
                 "store_name": parsed["store_name"],
-                "items": parsed["items"],
+                "items": items,
                 "total": total,
                 "total_warning": total_warning,
+                "needs_review": total_warning is not None,
                 "raw_text": raw_text
             }
 
@@ -116,6 +158,5 @@ async def scan_receipt(
             conn.close()
 
     finally:
-        # Clean up temp file
         if os.path.exists(file_path):
             os.remove(file_path)

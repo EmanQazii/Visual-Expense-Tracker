@@ -177,34 +177,37 @@ def preprocess(image_path, save_debug=True):
     if not is_ok:
         raise ValueError(f"Image rejected: {reason}")
 
-    # Use red channel for blue ink
     b, g, r = cv2.split(image)
-    gray = r.copy()
+    
+    # Detect if this is a blue ink receipt or black ink thermal
+    # Blue ink receipts have significantly higher blue channel values
+    avg_b = np.mean(b)
+    avg_r = np.mean(r)
+    
+    if avg_b > avg_r + 15:
+        # Blue ink receipt — use red channel (your original approach)
+        gray = r.copy()
+        print("=== Detected: blue ink receipt ===")
+    else:
+        # Black ink thermal receipt — use standard grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        print("=== Detected: thermal/black ink receipt ===")
 
-    # Resize to improve OCR — bigger = better
+    # Rest of pipeline stays the same
     scale = 2.0
-    gray = cv2.resize(gray, None, fx=scale, fy=scale, 
+    gray = cv2.resize(gray, None, fx=scale, fy=scale,
                       interpolation=cv2.INTER_CUBIC)
 
-    # Strong denoise to kill background grain
-    gray = cv2.fastNlMeansDenoising(gray, h=15, 
-                                     templateWindowSize=7, 
+    gray = cv2.fastNlMeansDenoising(gray, h=15,
+                                     templateWindowSize=7,
                                      searchWindowSize=21)
-
-    # CLAHE
     gray = apply_clahe(gray)
-
-    # Deskew
     gray = deskew(gray)
-
-    # Sharpen before threshold
     gray = apply_laplacian_sharpening(gray)
 
-    # Threshold
-    binary = cv2.threshold(gray, 0, 255, 
+    binary = cv2.threshold(gray, 0, 255,
                            cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
 
-    # Remove noise dots
     kernel = np.ones((2, 2), np.uint8)
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
